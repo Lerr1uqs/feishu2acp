@@ -18,7 +18,7 @@ use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberI
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    dotenvy::dotenv().ok();
+    dotenvy::dotenv_override().ok();
 
     let config = AppConfig::from_env()?;
     if let Some(parent) = config.log_path.parent() {
@@ -57,6 +57,7 @@ async fn main() -> anyhow::Result<()> {
         reply_chunk_chars = config.reply_chunk_chars,
         acpx_program = %config.acpx.program,
         acpx_args = config.acpx.args.len(),
+        nickname = config.feishu.nickname.as_deref().unwrap_or("-"),
         typing_reaction_emoji = config.feishu.typing_reaction_emoji.as_deref().unwrap_or("-"),
         media_dir = %config.feishu.media_dir.display(),
         max_markdown_bytes = config.feishu.max_markdown_bytes,

@@ -66,6 +66,7 @@
 常用可选项：
 
 - `FEISHU2ACP_PERMISSION_MODE`，默认 `approve-reads`
+- `FEISHU2ACP_NICKNAME`，配置后群聊消息必须以 `@昵称 ` 开头才会进入命令/会话解析
 - `FEISHU2ACP_STATE_PATH`
 - `FEISHU2ACP_REPLY_CHUNK_CHARS`
 - `FEISHU2ACP_MEDIA_DIR`

@@ -10,6 +10,7 @@ use crate::{
 pub struct FeishuConfig {
     pub app_id: String,
     pub app_secret: String,
+    pub nickname: Option<String>,
     pub typing_reaction_emoji: Option<String>,
     pub media_dir: PathBuf,
     pub max_markdown_bytes: usize,
@@ -90,6 +91,7 @@ impl AppConfig {
             feishu: FeishuConfig {
                 app_id: required_env("FEISHU_APP_ID")?,
                 app_secret: required_env("FEISHU_APP_SECRET")?,
+                nickname: nickname_from_env(),
                 // Feishu does not expose a lightweight typing callback in this bridge, so we use
                 // a configurable message reaction as the immediate "working on it" signal.
                 typing_reaction_emoji: typing_reaction_emoji_from_env(),
@@ -141,6 +143,20 @@ fn typing_reaction_emoji_from_env() -> Option<String> {
             }
         }
         Err(_) => Some("HOURGLASS".to_string()),
+    }
+}
+
+fn nickname_from_env() -> Option<String> {
+    match env::var("FEISHU2ACP_NICKNAME") {
+        Ok(value) => {
+            let trimmed = value.trim();
+            if trimmed.is_empty() || trimmed == "-" {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        }
+        Err(_) => None,
     }
 }
 
@@ -221,12 +237,14 @@ mod tests {
             env::set_var("FEISHU_APP_ID", "app");
             env::set_var("FEISHU_APP_SECRET", "secret");
             env::set_var("ACPX_PROGRAM_ARGS", r#"["acpx@latest"]"#);
+            env::remove_var("FEISHU2ACP_NICKNAME");
             env::remove_var("FEISHU2ACP_TYPING_EMOJI");
             env::remove_var("RUST_LOG");
         }
         let config = AppConfig::from_env().unwrap();
         assert_eq!(config.feishu.app_id, "app");
         assert_eq!(config.acpx.args, vec!["acpx@latest"]);
+        assert_eq!(config.feishu.nickname, None);
         assert_eq!(config.feishu.typing_reaction_emoji.as_deref(), Some("HOURGLASS"));
         assert!(config.feishu.enable_markdown_input);
         assert!(config.feishu.enable_markdown_output);
@@ -253,8 +271,21 @@ mod tests {
             env::set_var("FEISHU_APP_ID", "app");
             env::set_var("FEISHU_APP_SECRET", "secret");
             env::set_var("FEISHU2ACP_TYPING_EMOJI", "-");
+            env::remove_var("FEISHU2ACP_NICKNAME");
         }
         let config = AppConfig::from_env().unwrap();
         assert_eq!(config.feishu.typing_reaction_emoji, None);
+    }
+
+    #[test]
+    fn config_parses_optional_nickname() {
+        let _guard = env_lock().lock().unwrap();
+        unsafe {
+            env::set_var("FEISHU_APP_ID", "app");
+            env::set_var("FEISHU_APP_SECRET", "secret");
+            env::set_var("FEISHU2ACP_NICKNAME", " 藤田琴音 ");
+        }
+        let config = AppConfig::from_env().unwrap();
+        assert_eq!(config.feishu.nickname.as_deref(), Some("藤田琴音"));
     }
 }

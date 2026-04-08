@@ -1,7 +1,11 @@
 use std::{path::PathBuf, sync::Arc};
 
 use async_trait::async_trait;
-use open_lark::{client::ws_client::LarkWsClient, prelude::*};
+use open_lark::{
+    client::ws_client::LarkWsClient,
+    prelude::*,
+    service::im::v1::p2_im_message_receive_v1::MentionEvent,
+};
 use reqwest::{Client as HttpClient, multipart};
 use serde::Deserialize;
 use serde_json::json;
@@ -460,6 +464,7 @@ pub struct FeishuLongConnectionRuntime {
     client: Arc<LarkClient>,
     markdown: MarkdownSettings,
     media_http: FeishuMediaHttpClient,
+    nickname: Option<String>,
 }
 
 impl FeishuLongConnectionRuntime {
@@ -468,6 +473,7 @@ impl FeishuLongConnectionRuntime {
             client,
             markdown: MarkdownSettings::from(config),
             media_http: FeishuMediaHttpClient::new(config),
+            nickname: config.nickname.clone(),
         }
     }
 }
@@ -481,14 +487,24 @@ impl ChannelRuntime for FeishuLongConnectionRuntime {
         let client_for_messages = self.client.clone();
         let markdown_settings = self.markdown.clone();
         let media_http = self.media_http.clone();
+        let nickname = self.nickname.clone();
         let dispatcher = EventDispatcherHandler::builder()
             .register_p2_im_message_receive_v1(move |event| {
                 let handler = handler_for_messages.clone();
                 let client = client_for_messages.clone();
                 let markdown = markdown_settings.clone();
                 let media_http = media_http.clone();
+                let nickname = nickname.clone();
                 tokio::spawn(async move {
-                    match translate_inbound_event(&client, &media_http, &markdown, &event).await {
+                    match translate_inbound_event(
+                        &client,
+                        &media_http,
+                        &markdown,
+                        nickname.as_deref(),
+                        &event,
+                    )
+                    .await
+                    {
                         Ok(Some(message)) => {
                             if let Err(error) = handler.handle_message(message).await {
                                 error!("failed to process inbound feishu message: {error}");
@@ -549,6 +565,7 @@ async fn translate_inbound_event(
     client: &LarkClient,
     media_http: &FeishuMediaHttpClient,
     markdown: &MarkdownSettings,
+    nickname: Option<&str>,
     event: &P2ImMessageReceiveV1,
 ) -> Result<Option<InboundMessage>, BridgeError> {
     if event.event.sender.sender_type != "user" {
@@ -561,7 +578,7 @@ async fn translate_inbound_event(
     }
 
     match event.event.message.message_type.as_str() {
-        "text" => translate_text_event(event),
+        "text" => translate_text_event(event, nickname),
         "file" => translate_file_event(client, media_http, markdown, event).await,
         other => {
             debug!(
@@ -574,13 +591,29 @@ async fn translate_inbound_event(
     }
 }
 
-fn translate_text_event(event: &P2ImMessageReceiveV1) -> Result<Option<InboundMessage>, BridgeError> {
+fn translate_text_event(
+    event: &P2ImMessageReceiveV1,
+    nickname: Option<&str>,
+) -> Result<Option<InboundMessage>, BridgeError> {
     let payload: TextPayload =
         serde_json::from_str(&event.event.message.content).map_err(|error| {
             BridgeError::Channel(format!("failed to parse feishu message content: {error}"))
         })?;
 
-    let text = payload.text.unwrap_or_default().trim().to_string();
+    let Some(text) = normalize_inbound_text(event, payload.text.unwrap_or_default(), nickname) else {
+        return Ok(None);
+    };
+
+    if event.event.message.chat_type == "group" && nickname.is_some() {
+        debug!(
+            message_id = %event.event.message.message_id,
+            chat_id = %event.event.message.chat_id,
+            thread_id = event.event.message.thread_id.as_deref().unwrap_or("-"),
+            preview = %text_preview(&text, 120),
+            "translated feishu inbound group text message after nickname filtering"
+        );
+    }
+
     if text.is_empty() {
         debug!(
             message_id = %event.event.message.message_id,
@@ -602,6 +635,78 @@ fn translate_text_event(event: &P2ImMessageReceiveV1) -> Result<Option<InboundMe
         reply_target: reply_target_for_event(event).expect("message events always include target"),
         blocks: vec![MessageBlock::text(text)],
     }))
+}
+
+fn normalize_inbound_text(
+    event: &P2ImMessageReceiveV1,
+    text: String,
+    nickname: Option<&str>,
+) -> Option<String> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if event.event.message.chat_type != "group" {
+        return Some(trimmed.to_string());
+    }
+
+    let Some(nickname) = nickname
+        .map(str::trim)
+        .filter(|value| !value.is_empty()) else {
+        return Some(trimmed.to_string());
+    };
+
+    extract_prefixed_group_text(trimmed, nickname, event.event.message.mentions.as_deref())
+}
+
+fn extract_prefixed_group_text(
+    text: &str,
+    nickname: &str,
+    mentions: Option<&[MentionEvent]>,
+) -> Option<String> {
+    if let Some(stripped) = strip_prefixed_text(text, &format!("@{nickname}")) {
+        return Some(stripped);
+    }
+
+    let first_mention = mentions
+        .and_then(|items| items.first())
+        .filter(|mention| mention.name.trim() == nickname)?;
+
+    if let Some(stripped) = strip_prefixed_text(text, &first_mention.key) {
+        return Some(stripped);
+    }
+
+    let rest = strip_leading_at_tag(text)?;
+    strip_required_whitespace(rest)
+}
+
+fn strip_prefixed_text(text: &str, prefix: &str) -> Option<String> {
+    let rest = text.strip_prefix(prefix)?;
+    strip_required_whitespace(rest)
+}
+
+fn strip_leading_at_tag(text: &str) -> Option<&str> {
+    if !text.starts_with("<at") {
+        return None;
+    }
+
+    let end = text.find("</at>")? + "</at>".len();
+    Some(&text[end..])
+}
+
+fn strip_required_whitespace(value: &str) -> Option<String> {
+    let first = value.chars().next()?;
+    if !first.is_whitespace() {
+        return None;
+    }
+
+    let trimmed = value.trim_start();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
 }
 
 async fn translate_file_event(
@@ -866,6 +971,7 @@ mod tests {
         FeishuConfig {
             app_id: String::new(),
             app_secret: String::new(),
+            nickname: None,
             typing_reaction_emoji: None,
             media_dir: std::env::temp_dir(),
             max_markdown_bytes: 1024 * 1024,
@@ -913,6 +1019,7 @@ mod tests {
             &build_lark_client(&feishu_config()),
             &FeishuMediaHttpClient::new(&feishu_config()),
             &markdown_settings(),
+            None,
             &event,
         )
         .await
@@ -923,6 +1030,163 @@ mod tests {
             vec![MessageBlock::text("hello".to_string())]
         );
         assert_eq!(translated.reply_target.reply_to_message_id, "msg");
+    }
+
+    #[tokio::test]
+    async fn translate_group_message_strips_configured_nickname_prefix() {
+        let event: P2ImMessageReceiveV1 = serde_json::from_value(json!({
+            "schema": "2.0",
+            "header": {
+                "event_id": "evt-mention",
+                "token": "",
+                "create_time": "1",
+                "event_type": "im.message.receive_v1",
+                "tenant_key": "tenant",
+                "app_id": "app"
+            },
+            "event": {
+                "sender": {
+                    "sender_id": {
+                        "union_id": "union",
+                        "user_id": "user",
+                        "open_id": "open"
+                    },
+                    "sender_type": "user",
+                    "tenant_key": "tenant"
+                },
+                "message": {
+                    "message_id": "msg-group",
+                    "chat_id": "chat",
+                    "chat_type": "group",
+                    "message_type": "text",
+                    "content": "{\"text\":\"@藤田琴音 /pwd\"}",
+                    "create_time": "1",
+                    "update_time": "1",
+                    "mentions": []
+                }
+            }
+        }))
+        .unwrap();
+
+        let translated = translate_inbound_event(
+            &build_lark_client(&feishu_config()),
+            &FeishuMediaHttpClient::new(&feishu_config()),
+            &markdown_settings(),
+            Some("藤田琴音"),
+            &event,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(translated.blocks, vec![MessageBlock::text("/pwd")]);
+    }
+
+    #[tokio::test]
+    async fn translate_group_message_ignores_text_without_required_nickname_prefix() {
+        let event: P2ImMessageReceiveV1 = serde_json::from_value(json!({
+            "schema": "2.0",
+            "header": {
+                "event_id": "evt-group-plain",
+                "token": "",
+                "create_time": "1",
+                "event_type": "im.message.receive_v1",
+                "tenant_key": "tenant",
+                "app_id": "app"
+            },
+            "event": {
+                "sender": {
+                    "sender_id": {
+                        "union_id": "union",
+                        "user_id": "user",
+                        "open_id": "open"
+                    },
+                    "sender_type": "user",
+                    "tenant_key": "tenant"
+                },
+                "message": {
+                    "message_id": "msg-group-plain",
+                    "chat_id": "chat",
+                    "chat_type": "group",
+                    "message_type": "text",
+                    "content": "{\"text\":\"/pwd\"}",
+                    "create_time": "1",
+                    "update_time": "1"
+                }
+            }
+        }))
+        .unwrap();
+
+        let translated = translate_inbound_event(
+            &build_lark_client(&feishu_config()),
+            &FeishuMediaHttpClient::new(&feishu_config()),
+            &markdown_settings(),
+            Some("藤田琴音"),
+            &event,
+        )
+        .await
+        .unwrap();
+
+        assert!(translated.is_none());
+    }
+
+    #[tokio::test]
+    async fn translate_group_message_accepts_first_mention_tag_for_configured_nickname() {
+        let event: P2ImMessageReceiveV1 = serde_json::from_value(json!({
+            "schema": "2.0",
+            "header": {
+                "event_id": "evt-group-at-tag",
+                "token": "",
+                "create_time": "1",
+                "event_type": "im.message.receive_v1",
+                "tenant_key": "tenant",
+                "app_id": "app"
+            },
+            "event": {
+                "sender": {
+                    "sender_id": {
+                        "union_id": "union",
+                        "user_id": "user",
+                        "open_id": "open"
+                    },
+                    "sender_type": "user",
+                    "tenant_key": "tenant"
+                },
+                "message": {
+                    "message_id": "msg-group-at-tag",
+                    "chat_id": "chat",
+                    "chat_type": "group",
+                    "message_type": "text",
+                    "content": "{\"text\":\"<at user_id=\\\"ou_bot\\\"></at> /pwd\"}",
+                    "create_time": "1",
+                    "update_time": "1",
+                    "mentions": [{
+                        "key": "@_user_1",
+                        "id": {
+                            "union_id": "union-bot",
+                            "user_id": "user-bot",
+                            "open_id": "ou_bot"
+                        },
+                        "name": "藤田琴音",
+                        "tenant_key": "tenant"
+                    }]
+                }
+            }
+        }))
+        .unwrap();
+
+        let translated = translate_inbound_event(
+            &build_lark_client(&feishu_config()),
+            &FeishuMediaHttpClient::new(&feishu_config()),
+            &markdown_settings(),
+            Some("藤田琴音"),
+            &event,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(translated.blocks, vec![MessageBlock::text("/pwd")]);
     }
 
     #[tokio::test]
@@ -965,6 +1229,7 @@ mod tests {
                 &build_lark_client(&feishu_config()),
                 &FeishuMediaHttpClient::new(&feishu_config()),
                 &markdown_settings(),
+                None,
                 &event
             )
             .await

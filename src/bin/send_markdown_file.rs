@@ -12,7 +12,7 @@ const DEFAULT_CHAT_ID: &str = "oc_f5f9c8e4001155b3d3fd395426388ce4";
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    dotenvy::dotenv().ok();
+    dotenvy::dotenv_override().ok();
 
     let config = AppConfig::from_env()?;
     let client = build_lark_client(&config.feishu);
