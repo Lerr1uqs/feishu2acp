@@ -6,6 +6,8 @@ use thiserror::Error;
 pub enum BridgeError {
     #[error("configuration error: {0}")]
     Config(String),
+    #[error("input rejected: {0}")]
+    InputRejected(String),
     #[error("command parse error: {0}")]
     CommandParse(String),
     #[error("workspace does not exist: {0}")]
@@ -42,6 +44,7 @@ pub enum BridgeError {
 impl BridgeError {
     pub fn user_message(&self) -> String {
         match self {
+            Self::InputRejected(message) => message.clone(),
             Self::CommandParse(message) => format!("命令解析失败：{message}"),
             Self::WorkspaceNotFound(path) => {
                 format!("目录不存在：{}", path.display())
@@ -49,7 +52,7 @@ impl BridgeError {
             Self::NotDirectory(path) => {
                 format!("目标不是目录：{}", path.display())
             }
-            Self::UnsupportedMessage => "目前只支持文本消息。".to_string(),
+            Self::UnsupportedMessage => "当前消息类型暂不支持。".to_string(),
             Self::ProcessFailed {
                 command,
                 exit_code,

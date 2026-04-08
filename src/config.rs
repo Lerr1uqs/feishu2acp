@@ -10,6 +10,11 @@ use crate::{
 pub struct FeishuConfig {
     pub app_id: String,
     pub app_secret: String,
+    pub typing_reaction_emoji: Option<String>,
+    pub media_dir: PathBuf,
+    pub max_markdown_bytes: usize,
+    pub enable_markdown_input: bool,
+    pub enable_markdown_output: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -38,6 +43,7 @@ pub struct AppConfig {
     pub default_permission_mode: PermissionMode,
     pub reply_chunk_chars: usize,
     pub conversation_store_path: PathBuf,
+    pub log_path: PathBuf,
     pub tracing_filter: String,
 }
 
@@ -67,6 +73,9 @@ impl AppConfig {
         let conversation_store_path = env::var("FEISHU2ACP_STATE_PATH")
             .map(PathBuf::from)
             .unwrap_or_else(|_| default_data_dir().join("conversations.json"));
+        let log_path = env::var("FEISHU2ACP_LOG_PATH")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| default_workspace.join(".logs").join("feishu2acp.log"));
 
         let acpx_program = env::var("ACPX_PROGRAM").unwrap_or_else(|_| "acpx".to_string());
         let acpx_args = match env::var("ACPX_PROGRAM_ARGS") {
@@ -81,6 +90,15 @@ impl AppConfig {
             feishu: FeishuConfig {
                 app_id: required_env("FEISHU_APP_ID")?,
                 app_secret: required_env("FEISHU_APP_SECRET")?,
+                // Feishu does not expose a lightweight typing callback in this bridge, so we use
+                // a configurable message reaction as the immediate "working on it" signal.
+                typing_reaction_emoji: typing_reaction_emoji_from_env(),
+                media_dir: env::var("FEISHU2ACP_MEDIA_DIR")
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|_| default_data_dir().join("media")),
+                max_markdown_bytes: parse_usize_env("FEISHU2ACP_MAX_MARKDOWN_BYTES", 1024 * 1024)?,
+                enable_markdown_input: parse_bool_env("FEISHU2ACP_ENABLE_MARKDOWN_INPUT", true)?,
+                enable_markdown_output: parse_bool_env("FEISHU2ACP_ENABLE_MARKDOWN_OUTPUT", true)?,
             },
             acpx: AcpxCliConfig {
                 program: acpx_program,
@@ -99,8 +117,10 @@ impl AppConfig {
             default_permission_mode,
             reply_chunk_chars,
             conversation_store_path,
+            log_path,
             tracing_filter: env::var("RUST_LOG")
-                .unwrap_or_else(|_| "info,feishu2acp=debug".to_string()),
+                // Default to verbose bridge logs while keeping the Feishu SDK at info level.
+                .unwrap_or_else(|_| "info,open_lark=info,feishu2acp=debug".to_string()),
         })
     }
 }
@@ -110,6 +130,20 @@ fn required_env(name: &str) -> Result<String, BridgeError> {
         .map_err(|_| BridgeError::Config(format!("missing required environment variable {name}")))
 }
 
+fn typing_reaction_emoji_from_env() -> Option<String> {
+    match env::var("FEISHU2ACP_TYPING_EMOJI") {
+        Ok(value) => {
+            let trimmed = value.trim();
+            if trimmed.is_empty() || trimmed == "-" {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        }
+        Err(_) => Some("HOURGLASS".to_string()),
+    }
+}
+
 fn parse_u64_env(name: &str, default: u64) -> Result<u64, BridgeError> {
     env::var(name)
         .ok()
@@ -117,6 +151,32 @@ fn parse_u64_env(name: &str, default: u64) -> Result<u64, BridgeError> {
             value.parse::<u64>().map_err(|error| {
                 BridgeError::Config(format!("{name} must be a non-negative integer: {error}"))
             })
+        })
+        .transpose()?
+        .map_or(Ok(default), Ok)
+}
+
+fn parse_usize_env(name: &str, default: usize) -> Result<usize, BridgeError> {
+    env::var(name)
+        .ok()
+        .map(|value| {
+            value.parse::<usize>().map_err(|error| {
+                BridgeError::Config(format!("{name} must be a non-negative integer: {error}"))
+            })
+        })
+        .transpose()?
+        .map_or(Ok(default), Ok)
+}
+
+fn parse_bool_env(name: &str, default: bool) -> Result<bool, BridgeError> {
+    env::var(name)
+        .ok()
+        .map(|value| match value.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => Ok(true),
+            "0" | "false" | "no" | "off" => Ok(false),
+            _ => Err(BridgeError::Config(format!(
+                "{name} must be one of true/false/1/0/yes/no/on/off"
+            ))),
         })
         .transpose()?
         .map_or(Ok(default), Ok)
@@ -136,9 +196,14 @@ fn default_shell_args() -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use std::env;
+    use std::{env, sync::{Mutex, OnceLock}};
 
     use super::{AppConfig, default_shell_args};
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     #[test]
     fn default_shell_args_match_platform() {
@@ -151,15 +216,45 @@ mod tests {
 
     #[test]
     fn config_parses_basic_env() {
+        let _guard = env_lock().lock().unwrap();
         unsafe {
             env::set_var("FEISHU_APP_ID", "app");
             env::set_var("FEISHU_APP_SECRET", "secret");
             env::set_var("ACPX_PROGRAM_ARGS", r#"["acpx@latest"]"#);
+            env::remove_var("FEISHU2ACP_TYPING_EMOJI");
+            env::remove_var("RUST_LOG");
         }
         let config = AppConfig::from_env().unwrap();
         assert_eq!(config.feishu.app_id, "app");
         assert_eq!(config.acpx.args, vec!["acpx@latest"]);
+        assert_eq!(config.feishu.typing_reaction_emoji.as_deref(), Some("HOURGLASS"));
+        assert!(config.feishu.enable_markdown_input);
+        assert!(config.feishu.enable_markdown_output);
+        assert_eq!(config.feishu.max_markdown_bytes, 1024 * 1024);
         assert_eq!(config.command_prefix, "/");
         assert_eq!(config.default_agent, "codex");
+        assert_eq!(
+            config.log_path,
+            std::env::current_dir()
+                .unwrap()
+                .join(".logs")
+                .join("feishu2acp.log")
+        );
+        assert_eq!(
+            config.tracing_filter,
+            "info,open_lark=info,feishu2acp=debug"
+        );
+    }
+
+    #[test]
+    fn config_allows_disabling_typing_reaction() {
+        let _guard = env_lock().lock().unwrap();
+        unsafe {
+            env::set_var("FEISHU_APP_ID", "app");
+            env::set_var("FEISHU_APP_SECRET", "secret");
+            env::set_var("FEISHU2ACP_TYPING_EMOJI", "-");
+        }
+        let config = AppConfig::from_env().unwrap();
+        assert_eq!(config.feishu.typing_reaction_emoji, None);
     }
 }

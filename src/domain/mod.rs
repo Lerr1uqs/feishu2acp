@@ -29,10 +29,55 @@ pub struct ReplyTarget {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BinarySource {
+    Bytes(Vec<u8>),
+    LocalPath(PathBuf),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MessageBlock {
+    Text {
+        text: String,
+    },
+    Image {
+        mime_type: String,
+        source: BinarySource,
+        alt: Option<String>,
+    },
+    Document {
+        mime_type: String,
+        file_name: String,
+        source: BinarySource,
+        extracted_text: Option<String>,
+    },
+}
+
+impl MessageBlock {
+    pub fn text(text: impl Into<String>) -> Self {
+        Self::Text { text: text.into() }
+    }
+
+    pub fn as_text(&self) -> Option<&str> {
+        match self {
+            Self::Text { text } => Some(text),
+            _ => None,
+        }
+    }
+
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Text { .. } => "text",
+            Self::Image { .. } => "image",
+            Self::Document { .. } => "document",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InboundMessage {
     pub conversation: ConversationKey,
     pub reply_target: ReplyTarget,
-    pub text: String,
+    pub blocks: Vec<MessageBlock>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -125,6 +170,8 @@ pub struct SessionRecord {
     pub agent: String,
     pub cwd: PathBuf,
     pub name: Option<String>,
+    pub title: Option<String>,
+    pub first_user_preview: Option<String>,
     pub created_at: String,
     pub last_used_at: String,
     pub last_prompt_at: Option<String>,
@@ -156,8 +203,16 @@ pub struct SessionStatus {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PromptResponse {
-    pub text: String,
+pub struct AgentReply {
+    pub blocks: Vec<MessageBlock>,
+}
+
+impl AgentReply {
+    pub fn from_text(text: impl Into<String>) -> Self {
+        Self {
+            blocks: vec![MessageBlock::text(text)],
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -35,6 +35,7 @@ pub enum SessionCommand {
 }
 
 pub fn parse_user_request(prefix: &str, raw: &str) -> Result<UserRequest, BridgeError> {
+    validate_user_input(raw)?;
     let trimmed = raw.trim();
     if !trimmed.starts_with(prefix) {
         return Ok(UserRequest::Prompt(trimmed.to_string()));
@@ -46,6 +47,29 @@ pub fn parse_user_request(prefix: &str, raw: &str) -> Result<UserRequest, Bridge
     }
 
     parse_command(command_body)
+}
+
+fn validate_user_input(raw: &str) -> Result<(), BridgeError> {
+    // Reject control / bidi-override characters early so chat payloads cannot smuggle invisible
+    // command changes into `/cd`, `/shell`, or prompt text copied from IM clients.
+    if raw.chars().any(is_disallowed_input_char) {
+        return Err(BridgeError::InputRejected(
+            "输入包含非法控制字符，请移除后重试。".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn is_disallowed_input_char(ch: char) -> bool {
+    if matches!(ch, '\n' | '\r' | '\t') {
+        return false;
+    }
+
+    ch.is_control()
+        || matches!(
+            ch,
+            '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}'
+        )
 }
 
 fn parse_command(raw: &str) -> Result<UserRequest, BridgeError> {
@@ -101,7 +125,7 @@ fn parse_command(raw: &str) -> Result<UserRequest, BridgeError> {
         )?))),
         "session" => parse_session_command(rest),
         other => Err(BridgeError::CommandParse(format!(
-            "未知命令：{other}，请使用 /command help"
+            "未知命令：{other}，请使用 /help"
         ))),
     }
 }
@@ -233,6 +257,15 @@ mod tests {
     }
 
     #[test]
+    fn slash_prefix_parses_cd_command() {
+        let parsed = parse_user_request("/", "/cd /tmp/worktree").unwrap();
+        assert_eq!(
+            parsed,
+            UserRequest::Command(BotCommand::ChangeDirectory("/tmp/worktree".to_string()))
+        );
+    }
+
+    #[test]
     fn parses_cd_command() {
         let parsed =
             parse_user_request("/command", r#"/command cd "F:\coding workspace""#).unwrap();
@@ -290,5 +323,23 @@ mod tests {
     fn rejects_unknown_command() {
         let error = parse_user_request("/command", "/command nope").unwrap_err();
         assert!(error.user_message().contains("命令解析失败"));
+    }
+
+    #[test]
+    fn rejects_control_characters_before_parsing() {
+        let error = parse_user_request("/", "/cd /tmp/\u{001b}[31mboom").unwrap_err();
+        assert_eq!(
+            error.user_message(),
+            "输入包含非法控制字符，请移除后重试。"
+        );
+    }
+
+    #[test]
+    fn rejects_bidi_override_characters_before_parsing() {
+        let error = parse_user_request("/", "/cd /tmp/\u{202e}txt.exe").unwrap_err();
+        assert_eq!(
+            error.user_message(),
+            "输入包含非法控制字符，请移除后重试。"
+        );
     }
 }

@@ -150,9 +150,25 @@ pub fn normalize_session_name(value: Option<String>) -> Option<String> {
     }
 }
 
+pub fn text_preview(value: &str, max_chars: usize) -> String {
+    if max_chars == 0 {
+        return String::new();
+    }
+
+    let normalized = value.replace('\n', "\\n");
+    let mut preview = normalized.chars().take(max_chars).collect::<String>();
+    if normalized.chars().count() > max_chars {
+        preview.push_str("...");
+    }
+    preview
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{chunk_text, finalize_chunk_labels, normalize_session_name, parse_argument_list};
+    use super::{
+        chunk_text, finalize_chunk_labels, normalize_session_name, parse_argument_list,
+        text_preview,
+    };
 
     #[test]
     fn parse_argument_list_supports_json_array() {
@@ -180,5 +196,11 @@ mod tests {
             normalize_session_name(Some("backend".to_string())),
             Some("backend".to_string())
         );
+    }
+
+    #[test]
+    fn text_preview_truncates_and_normalizes_newlines() {
+        assert_eq!(text_preview("hello\nworld", 7), "hello\\n...");
+        assert_eq!(text_preview("short", 20), "short");
     }
 }

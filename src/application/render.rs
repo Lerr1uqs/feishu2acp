@@ -1,8 +1,6 @@
-use std::path::Path;
-
 use crate::domain::{
-    ConversationBinding, PromptResponse, SessionHistoryEntry, SessionRecord, SessionStatus,
-    SessionSummary, ShellOutput,
+    ConversationBinding, SessionHistoryEntry, SessionRecord, SessionStatus, SessionSummary,
+    ShellOutput,
 };
 
 pub fn help_text(prefix: &str) -> String {
@@ -62,6 +60,8 @@ pub fn session_record_text(record: &SessionRecord) -> String {
             "agent: {}\n",
             "cwd: {}\n",
             "name: {}\n",
+            "title: {}\n",
+            "first_user: {}\n",
             "created_at: {}\n",
             "last_used_at: {}\n",
             "last_prompt_at: {}\n",
@@ -75,6 +75,8 @@ pub fn session_record_text(record: &SessionRecord) -> String {
         record.agent,
         record.cwd.display(),
         record.name.as_deref().unwrap_or("default"),
+        record.title.as_deref().unwrap_or("-"),
+        record.first_user_preview.as_deref().unwrap_or("-"),
         record.created_at,
         record.last_used_at,
         record.last_prompt_at.as_deref().unwrap_or("-"),
@@ -84,14 +86,15 @@ pub fn session_record_text(record: &SessionRecord) -> String {
     )
 }
 
-pub fn session_list_text(records: &[SessionRecord], current_cwd: &Path) -> String {
+pub fn session_list_text(records: &[SessionRecord], current: &ConversationBinding) -> String {
     if records.is_empty() {
         return "当前 agent 没有任何 acpx session。".to_string();
     }
 
+    let current_index = current_session_index(records, current);
     let mut lines = vec!["sessions".to_string()];
-    for record in records {
-        let marker = if record.cwd == current_cwd { "*" } else { "-" };
+    for (index, record) in records.iter().enumerate() {
+        let marker = if Some(index) == current_index { "*" } else { "-" };
         lines.push(format!(
             "{marker} {} | {} | {} | {}",
             record.name.as_deref().unwrap_or("default"),
@@ -99,8 +102,43 @@ pub fn session_list_text(records: &[SessionRecord], current_cwd: &Path) -> Strin
             record.cwd.display(),
             if record.closed { "closed" } else { "open" }
         ));
+        if let Some((source, summary)) = session_record_summary(record) {
+            lines.push(format!("  [{source}] {summary}"));
+        }
     }
     lines.join("\n")
+}
+
+fn current_session_index(records: &[SessionRecord], current: &ConversationBinding) -> Option<usize> {
+    records
+        .iter()
+        .enumerate()
+        .filter(|(_, record)| {
+            record.cwd == current.cwd && record.name.as_deref() == current.session_name.as_deref()
+        })
+        // The binding only stores cwd + session name, so if ACPX keeps historical duplicates we
+        // mark the newest matching record and prefer an open one over an older closed record.
+        .max_by_key(|(_, record)| (u8::from(!record.closed), record.last_used_at.as_str()))
+        .map(|(index, _)| index)
+}
+
+fn session_record_summary(record: &SessionRecord) -> Option<(&'static str, String)> {
+    let (source, raw) = if let Some(title) = record.title.as_deref() {
+        ("title", title)
+    } else {
+        ("first", record.first_user_preview.as_deref()?)
+    };
+    let compact = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    if compact.is_empty() {
+        return None;
+    }
+
+    const MAX_SUMMARY_CHARS: usize = 72;
+    let mut summary = compact.chars().take(MAX_SUMMARY_CHARS).collect::<String>();
+    if compact.chars().count() > MAX_SUMMARY_CHARS {
+        summary.push_str("...");
+    }
+    Some((source, summary))
 }
 
 pub fn history_text(entries: &[SessionHistoryEntry]) -> String {
@@ -152,14 +190,6 @@ pub fn status_text(status: &SessionStatus) -> String {
     )
 }
 
-pub fn prompt_text(response: &PromptResponse) -> String {
-    if response.text.trim().is_empty() {
-        "Codex 已完成，但没有返回可显示的文本。".to_string()
-    } else {
-        response.text.trim().to_string()
-    }
-}
-
 pub fn shell_output_text(output: &ShellOutput) -> String {
     let stdout = if output.stdout.trim().is_empty() {
         "[empty]".to_string()
@@ -194,13 +224,13 @@ mod tests {
     use std::path::PathBuf;
 
     use crate::domain::{
-        ConversationBinding, PermissionMode, PromptResponse, SessionHistoryEntry, SessionRecord,
-        SessionStatus, SessionSummary, ShellOutput,
+        ConversationBinding, PermissionMode, SessionHistoryEntry, SessionRecord, SessionStatus,
+        SessionSummary, ShellOutput,
     };
 
     use super::{
-        binding_text, history_text, prompt_text, session_list_text, session_record_text,
-        session_summary_text, shell_output_text, status_text,
+        binding_text, history_text, session_list_text, session_record_text, session_summary_text,
+        shell_output_text, status_text,
     };
 
     #[test]
@@ -237,6 +267,8 @@ mod tests {
             agent: "codex".to_string(),
             cwd: PathBuf::from("/repo"),
             name: Some("docs".to_string()),
+            title: Some("Fix reply routing".to_string()),
+            first_user_preview: Some("修一下 feishu reply body".to_string()),
             created_at: "2026-01-01T00:00:00Z".to_string(),
             last_used_at: "2026-01-01T00:01:00Z".to_string(),
             last_prompt_at: Some("2026-01-01T00:01:00Z".to_string()),
@@ -259,6 +291,7 @@ mod tests {
         };
 
         assert!(session_record_text(&record).contains("acp-1"));
+        assert!(session_record_text(&record).contains("Fix reply routing"));
         assert!(status_text(&status).contains("running"));
     }
 
@@ -271,6 +304,8 @@ mod tests {
             agent: "codex".to_string(),
             cwd: PathBuf::from("/repo"),
             name: None,
+            title: None,
+            first_user_preview: Some("修一下飞书回复的 body 参数问题".to_string()),
             created_at: "2026".to_string(),
             last_used_at: "2026".to_string(),
             last_prompt_at: None,
@@ -290,22 +325,66 @@ mod tests {
             stdout: "/repo".to_string(),
             stderr: String::new(),
         };
+        let current = ConversationBinding {
+            cwd: PathBuf::from("/repo"),
+            agent: "codex".to_string(),
+            session_name: None,
+            permission_mode: PermissionMode::ApproveReads,
+        };
 
-        assert!(session_list_text(&records, std::path::Path::new("/repo")).contains("*"));
+        let rendered = session_list_text(&records, &current);
+        assert!(rendered.contains("*"));
+        assert!(rendered.contains("[first] 修一下飞书回复的 body 参数问题"));
         assert!(history_text(&history).contains("done"));
         assert!(shell_output_text(&shell).contains("exit_code: 0"));
     }
 
     #[test]
-    fn prompt_text_uses_fallback_for_empty_output() {
-        let empty = PromptResponse {
-            text: "   ".to_string(),
-        };
-        let rich = PromptResponse {
-            text: "hello".to_string(),
+    fn session_list_marks_only_latest_matching_record_and_prefers_title() {
+        let records = vec![
+            SessionRecord {
+                record_id: "rec-old".to_string(),
+                acp_session_id: "acp-old".to_string(),
+                agent_session_id: None,
+                agent: "codex".to_string(),
+                cwd: PathBuf::from("/repo"),
+                name: None,
+                title: Some("old closed session".to_string()),
+                first_user_preview: Some("older".to_string()),
+                created_at: "2026".to_string(),
+                last_used_at: "2026-01-01T00:00:00Z".to_string(),
+                last_prompt_at: None,
+                closed: true,
+                model: None,
+                mode: None,
+            },
+            SessionRecord {
+                record_id: "rec-current".to_string(),
+                acp_session_id: "acp-current".to_string(),
+                agent_session_id: None,
+                agent: "codex".to_string(),
+                cwd: PathBuf::from("/repo"),
+                name: None,
+                title: Some("current open session".to_string()),
+                first_user_preview: Some("newer".to_string()),
+                created_at: "2026".to_string(),
+                last_used_at: "2026-01-01T00:02:00Z".to_string(),
+                last_prompt_at: None,
+                closed: false,
+                model: None,
+                mode: None,
+            },
+        ];
+        let current = ConversationBinding {
+            cwd: PathBuf::from("/repo"),
+            agent: "codex".to_string(),
+            session_name: None,
+            permission_mode: PermissionMode::ApproveReads,
         };
 
-        assert!(prompt_text(&empty).contains("没有返回"));
-        assert_eq!(prompt_text(&rich), "hello");
+        let rendered = session_list_text(&records, &current);
+        assert_eq!(rendered.matches('*').count(), 1);
+        assert!(rendered.contains("* default | rec-current"));
+        assert!(rendered.contains("[title] current open session"));
     }
 }

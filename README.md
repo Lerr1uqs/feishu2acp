@@ -4,6 +4,7 @@
 
 - 飞书机器人通过长连接接收消息
 - 普通文本消息自动路由到 `acpx -> codex`
+- 飞书 `markdown` 文件消息会作为结构化文档块送进当前会话
 - `/...` 用来控制当前会话上下文
 - `acpx` 负责把消息转成 ACP/ACPX 调用并复用本地长会话
 - 飞书和 `acpx/codex` 都通过 trait 解耦，便于 mock 和单测
@@ -33,6 +34,9 @@
 ## 功能
 
 - 普通文本消息自动进入当前 Codex session
+- 飞书 `.md/.markdown` 文件会下载到本地媒体目录，并以文档块形式送入当前 session
+- agent 可以通过 `<feishu2acp-document file_name="xxx.md">...</feishu2acp-document>` 返回 markdown 文件，桥接层会回飞书 `file` 消息
+  - 由于飞书 IM 文件接口不接受 `.md` 扩展名，回传时会使用 `.md.txt` 作为传输文件名，桥接层在入站时会还原成逻辑上的 `*.md`
 - `/` 显示帮助
 - `/cd <dir>` 切换工作目录
 - `/pwd` 查看当前上下文
@@ -64,6 +68,10 @@
 - `FEISHU2ACP_PERMISSION_MODE`，默认 `approve-reads`
 - `FEISHU2ACP_STATE_PATH`
 - `FEISHU2ACP_REPLY_CHUNK_CHARS`
+- `FEISHU2ACP_MEDIA_DIR`
+- `FEISHU2ACP_MAX_MARKDOWN_BYTES`，默认 `1048576`
+- `FEISHU2ACP_ENABLE_MARKDOWN_INPUT`，默认 `true`
+- `FEISHU2ACP_ENABLE_MARKDOWN_OUTPUT`，默认 `true`
 
 固定行为：
 
@@ -113,6 +121,14 @@ sh -lc
 cargo run
 ```
 
+向指定飞书群发送 markdown 测试文件：
+
+```bash
+cargo run --bin send_markdown_file -- --file README.md --note "请总结这个文档"
+```
+
+如果不传参数，脚本会给默认群 `oc_f5f9c8e4001155b3d3fd395426388ce4` 发送一份内置 smoke-test markdown。
+
 ## 测试
 
 ```bash
@@ -128,6 +144,7 @@ cargo test
 - 文件/内存状态存储
 - 飞书入站事件翻译
 - shell 适配器
+- markdown 文档块收发与回复协议解析
 
 ## 备注
 

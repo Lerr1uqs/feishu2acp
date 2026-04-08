@@ -4,9 +4,9 @@ use async_trait::async_trait;
 
 use crate::{
     domain::{
-        ConversationBinding, ConversationKey, InboundMessage, PromptResponse, ReplyTarget,
-        SessionHistoryEntry, SessionRecord, SessionSelector, SessionStatus, SessionSummary,
-        ShellOutput,
+        AgentReply, ConversationBinding, ConversationKey, InboundMessage, MessageBlock,
+        ReplyTarget, SessionHistoryEntry, SessionRecord, SessionSelector, SessionStatus,
+        SessionSummary, ShellOutput,
     },
     error::BridgeError,
 };
@@ -33,7 +33,13 @@ pub trait ProcessRunner: Send + Sync {
 
 #[async_trait]
 pub trait ChannelClient: Send + Sync {
-    async fn send_text(&self, target: &ReplyTarget, text: &str) -> Result<(), BridgeError>;
+    async fn react_typing(&self, target: &ReplyTarget) -> Result<(), BridgeError>;
+
+    async fn send_message(
+        &self,
+        target: &ReplyTarget,
+        blocks: &[MessageBlock],
+    ) -> Result<(), BridgeError>;
 }
 
 #[async_trait]
@@ -95,14 +101,14 @@ pub trait AcpxGateway: Send + Sync {
     async fn prompt(
         &self,
         selector: &SessionSelector,
-        prompt: &str,
-    ) -> Result<PromptResponse, BridgeError>;
+        blocks: &[MessageBlock],
+    ) -> Result<AgentReply, BridgeError>;
 
     async fn exec(
         &self,
         selector: &SessionSelector,
-        prompt: &str,
-    ) -> Result<PromptResponse, BridgeError>;
+        blocks: &[MessageBlock],
+    ) -> Result<AgentReply, BridgeError>;
 
     async fn set_mode(&self, selector: &SessionSelector, mode: &str) -> Result<(), BridgeError>;
 
